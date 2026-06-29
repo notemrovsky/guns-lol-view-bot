@@ -1,42 +1,65 @@
-import subprocess
-import json
-import os
+import base64
+import hashlib
+import itertools
 import random
+import struct
+
+import blake3
 
 
 class PowSolver:
     def solve(self, challenge_data):
-        timestamp, challenge_hash, salt, token = challenge_data
+        timestamp, challenge_hash, salt, token_b64 = challenge_data
+        token = base64.urlsafe_b64decode(token_b64 + "==")
 
-        payload = json.dumps({
-            "o09": challenge_hash,
-            "d": 5,
-            "_org_ts": str(timestamp),
-            "_n": salt,
-            "_2xa": token,
-        })
+        difficulty = token[2]
+        positions_unsorted = list(token[3:3 + difficulty])
+        positions_sorted = sorted(positions_unsorted)
+        target = token[21:80].decode("ascii")
+        target_hash = bytes.fromhex(challenge_hash)
+        key8 = token[13:21]
+        suffix = (salt + str(timestamp)).encode()
 
-        result = subprocess.run(
-            ["node", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "solve.js"), payload],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        seal = self.brute_force(target, positions_sorted, target_hash, suffix)
+        score = self.compute_score(seal, target_hash, salt, timestamp)
+        nonce = self.build_nonce(seal, positions_unsorted, difficulty, key8, target_hash, score)
+        seal = self.mangle_seal(seal, timestamp, salt)
 
-        if result.returncode != 0:
-            raise RuntimeError(f"solve.js failed: {result.stderr}")
+        return [token_b64, timestamp, challenge_hash, salt, seal, nonce]
 
-        wasm_result = json.loads(result.stdout)
-        seal = self.mangle_seal(wasm_result["seal"], timestamp, salt)
+    def brute_force(self, target, positions, target_hash, suffix):
+        for combo in itertools.product("0123456789abcdef", repeat=len(positions)):
+            candidate = list(target)
+            for pos, char in zip(positions, combo):
+                candidate.insert(pos, char)
+            candidate_str = "".join(candidate)
+            if hashlib.sha256(candidate_str.encode() + suffix).digest() == target_hash:
+                return candidate_str
+        raise RuntimeError("no solution found")
 
-        return [
-            token,
-            timestamp,
-            challenge_hash,
-            salt,
-            seal,
-            wasm_result["_oo"],
-        ]
+    def compute_score(self, seal, challenge_hash_bytes, salt, timestamp):
+        target = blake3.blake3(challenge_hash_bytes + salt.encode() + str(timestamp).encode()).digest()
+        seal_hash = blake3.blake3(seal.encode()).digest()
+        score = 0
+        for i in range(32):
+            if seal_hash[i] == target[i]:
+                score += 8
+            else:
+                xor = seal_hash[i] ^ target[i]
+                clz = 0
+                for bit in range(7, -1, -1):
+                    if xor & (1 << bit):
+                        break
+                    clz += 1
+                score |= clz
+                return score
+        return 256
+
+    def build_nonce(self, seal, positions, difficulty, key8, challenge_hash_bytes, score):
+        nonce_hex = "".join(seal[p] for p in positions)
+        partial = bytes([0x51, difficulty]) + nonce_hex.encode() + struct.pack("<I", score)
+        integrity = blake3.blake3(partial + key8 + challenge_hash_bytes).digest()[:8]
+        return base64.urlsafe_b64encode(partial + integrity).rstrip(b"=").decode()
 
     def mangle_seal(self, seal, timestamp, salt):
         pos1 = timestamp % 10
