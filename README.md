@@ -2,6 +2,8 @@
 
 become an egangster and mass inflate your guns.lol profile views to attract ekittens. because nothing screams "i'm dangerous" like a suspiciously high view count.
 
+Note: If you're an e-gangster, you don't need help setting up this script just follow the instructions below and don't DM me.
+
 ## what it does
 
 solves guns.lol's proof-of-work challenge in pure python (reversed their wasm solver), solves cloudflare turnstile, and sends view requests through rotating proxies. no untrusted code execution. fully automated.
